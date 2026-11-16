@@ -8,7 +8,7 @@ Built the same way as Content Calendar: React + Vite, Supabase for sign-in and d
 
 - `src/main.jsx` is the app. `src/logic.js` holds the small pure helpers and `test/` covers them (`npm test`).
 - `supabase/functions/smm/index.ts` is the server function. It runs the daily Instagram and Facebook sync, logs pasted links, and fetches cover images so the app can read their text.
-- Database objects are all prefixed `smm_`. Remixes are written into the existing `cal_items` table, labelled with the brand, as one "to film" entry and one "post" entry.
+- Database objects are all prefixed `smm_`. Remixes are written into the existing `cal_items` table, labelled with the brand, as one "to film" entry and one "post" entry. The Calendar tab shows that same table for every brand in one place.
 - On-screen text is read in the browser with Tesseract.js. No paid service is involved.
 
 ## What works before Meta is connected

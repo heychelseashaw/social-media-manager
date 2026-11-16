@@ -10,6 +10,14 @@ const FN = SB_URL + '/functions/v1/smm'
 const pad = n => String(n).padStart(2, '0')
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 const plusDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d) }
+const parseDay = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d) }
+const addDays = (s, n) => { const d = parseDay(s); d.setDate(d.getDate() + n); return ymd(d) }
+const niceDay = d => parseDay(d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const NEXT = { broll: { todo: ['filmed', 'Mark filmed'], filmed: ['edited', 'Mark edited'], edited: [null, ''] }, post: { todo: ['scheduled', 'Mark scheduled'], scheduled: ['posted', 'Mark posted'], posted: [null, ''] } }
+const STAGE = { todo: 'To do', filmed: 'Filmed', edited: 'Edited', scheduled: 'Scheduled', posted: 'Posted' }
+const POST_TYPES = ['Reel', 'Carousel', 'Story', 'Photo', 'Video', 'Text post']
 const PLATFORMS = { instagram: 'Instagram', tiktok: 'TikTok', facebook: 'Facebook', other: 'Other' }
 
 async function token() { const { data } = await sb.auth.getSession(); return data.session?.access_token }
@@ -100,7 +108,7 @@ function App({ user }) {
   if (!brands.length) return <div className="shell"><header><div className="brand">Social Media Manager</div></header><main>
     <p className="muted">Start by adding your first brand. You can add the second one in Settings afterwards.</p><BrandForm onSave={r => saveBrand(r)} /></main>{msg && <div className={'toast' + (msg.bad ? ' bad' : '')} role="status">{msg.t}</div>}</div>
   const outliers = posts.filter(p => outlierOf(p, brand)), drafts = remixes.filter(r => r.status === 'draft')
-  const tabs = [['outliers', `Outliers${outliers.length ? ` (${outliers.length})` : ''}`], ['add', 'Add a link'], ['remixes', `Remixes${drafts.length ? ` (${drafts.length})` : ''}`], ['patterns', 'Patterns'], ['accounts', 'Accounts'], ['settings', 'Settings']]
+  const tabs = [['outliers', `Outliers${outliers.length ? ` (${outliers.length})` : ''}`], ['add', 'Add a link'], ['remixes', `Remixes${drafts.length ? ` (${drafts.length})` : ''}`], ['calendar', 'Calendar'], ['patterns', 'Patterns'], ['accounts', 'Accounts'], ['settings', 'Settings']]
   return <div className="shell">
     <header><div className="row"><div className="brand">Social Media Manager</div>
       <select value={brand.id} onChange={e => { setBid(e.target.value); setDraftFor(null) }} aria-label="Brand">{brands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
@@ -109,6 +117,7 @@ function App({ user }) {
       {tab === 'outliers' && <Outliers api={api} />}
       {tab === 'add' && <AddLink api={api} />}
       {tab === 'remixes' && <Remixes api={api} draftFor={draftFor} clearDraft={() => setDraftFor(null)} />}
+      {tab === 'calendar' && <Calendar api={api} brands={brands} />}
       {tab === 'patterns' && <Patterns api={api} />}
       {tab === 'accounts' && <Accounts api={api} />}
       {tab === 'settings' && <div className="stack">
@@ -238,6 +247,70 @@ function Remixes({ api, draftFor, clearDraft }) {
       {waiting > 0 && <span className="muted small">{waiting} outlier{waiting === 1 ? '' : 's'} waiting for a remix</span>}</div>
     {list.length ? list.map(r => <RemixEditor key={r.id + r.updated_at} remix={r} source={byId[r.post_id]} api={api} />) : !draftFor && <section className="card"><p className="muted">Nothing here yet. Remixes appear as outliers are found, or start one from any post on the Outliers tab.</p></section>}
   </div>
+}
+
+// The calendar reads and writes the same entries as the Content Calendar app, for every brand at once.
+function CalItem({ i, act }) {
+  const [next, label] = NEXT[i.kind][i.stage]
+  return <li className={'item' + (i.stage === 'edited' || i.stage === 'posted' ? ' fin' : '')}>
+    <div className="grow"><b>{i.title}</b>
+      <div className="muted small">{i.kind === 'post' ? [i.post_type, i.platform].filter(Boolean).join(' · ') || 'Post' : 'To film'} · {niceDay(i.day)} · {STAGE[i.stage]}{i.notes ? ' · ' + i.notes : ''}</div></div>
+    <div className="row wrap end">{next && <button className="ghost small" onClick={() => act.patch(i.id, { stage: next })}>{label}</button>}
+      {i.stage !== 'todo' && <button className="link" onClick={() => act.patch(i.id, { stage: 'todo' })}>Undo</button>}
+      <button className="link" onClick={() => act.patch(i.id, { day: addDays(i.day, 1) })}>Move a day later</button>
+      <button className="link" onClick={() => act.remove(i.id)}>Delete</button></div></li>
+}
+
+function Calendar({ api, brands }) {
+  const today = ymd(new Date())
+  const [month, setMonth] = useState(() => { const t = new Date(); return new Date(t.getFullYear(), t.getMonth(), 1) }), [sel, setSel] = useState(today)
+  const [items, setItems] = useState([]), [open, setOpen] = useState([]), [only, setOnly] = useState(false)
+  const [f, setF] = useState({ kind: 'broll', title: '', post_type: '', notes: '' })
+  const start = useMemo(() => { const d = new Date(month); d.setDate(1 - d.getDay()); return ymd(d) }, [month]), end = addDays(start, 41)
+  const load = useCallback(async () => {
+    const [a, b] = await Promise.all([
+      sb.from('cal_items').select('*').gte('day', start).lte('day', end).order('created_at'),
+      sb.from('cal_items').select('*').eq('kind', 'broll').neq('stage', 'edited').lte('day', addDays(today, 14)).order('day').limit(200)])
+    if (a.error || b.error) return api.notify((a.error || b.error).message, true)
+    setItems(a.data); setOpen(b.data)
+  }, [start, end, today])
+  useEffect(() => { load() }, [load])
+  const act = {
+    async patch(id, p) { const { error } = await sb.from('cal_items').update(p).eq('id', id); if (error) return api.notify(error.message, true); load() },
+    async remove(id) { if (!confirm('Delete this item?')) return; const { error } = await sb.from('cal_items').delete().eq('id', id); if (error) return api.notify(error.message, true); load() },
+  }
+  const mine = i => !only || i.title.startsWith(api.brand.label + ':')
+  const shown = items.filter(mine), toFilm = open.filter(mine)
+  const byDay = useMemo(() => { const m = {}; shown.forEach(i => (m[i.day] ||= []).push(i)); return m }, [items, only, api.brand.label])
+  const dayList = byDay[sel] || []
+  const add = async e => { e.preventDefault(); const t = f.title.trim(); if (!t) return
+    const labelled = brands.some(b => t.startsWith(b.label + ':')) ? t : `${api.brand.label}: ${t}`
+    const { error } = await sb.from('cal_items').insert({ day: sel, kind: f.kind, title: labelled.slice(0, 300), post_type: f.kind === 'post' ? f.post_type || null : null, platform: null, notes: f.notes.trim() || null })
+    if (error) return api.notify(error.message, true); setF({ ...f, title: '', notes: '' }); load() }
+  const goToday = () => { const t = new Date(); setMonth(new Date(t.getFullYear(), t.getMonth(), 1)); setSel(today) }
+  return <div className="stack">
+    <div className="row wrap"><label className="check"><input type="checkbox" checked={only} onChange={e => setOnly(e.target.checked)} /> Show only {api.brand.label}</label>
+      <span className="muted small">Otherwise every brand is shown together.</span></div>
+    <section className="card"><h2>To film{toFilm.length ? ` (${toFilm.length})` : ''}</h2>
+      {toFilm.length ? <ul className="items">{toFilm.map(i => <CalItem key={i.id} i={i} act={act} />)}</ul> : <p className="muted small">Nothing waiting to be filmed or edited in the next two weeks.</p>}</section>
+    <div className="cols">
+      <section className="card"><div className="row"><button className="ghost" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} aria-label="Previous month">‹</button>
+        <h2 className="grow center-t">{MONTHS[month.getMonth()]} {month.getFullYear()}</h2>
+        <button className="ghost" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} aria-label="Next month">›</button><button className="ghost" onClick={goToday}>Today</button></div>
+        <div className="grid head">{DOW.map(d => <div key={d}>{d}</div>)}</div>
+        <div className="grid">{Array.from({ length: 42 }, (_, n) => addDays(start, n)).map(d => { const list = byDay[d] || [], b = list.filter(x => x.kind === 'broll'), p = list.filter(x => x.kind === 'post')
+          return <button key={d} className={'day' + (d === sel ? ' sel' : '') + (d === today ? ' today' : '') + (parseDay(d).getMonth() !== month.getMonth() ? ' out' : '')} onClick={() => setSel(d)}>
+            <span className="n">{parseDay(d).getDate()}</span>
+            {b.length > 0 && <span className={'chip b' + (b.every(x => x.stage === 'edited') ? ' done' : '')}>{b.length} to film</span>}
+            {p.map(x => <span key={x.id} className={'chip p' + (x.stage !== 'todo' ? ' done' : '')}>{x.post_type || 'Post'}</span>)}</button> })}</div></section>
+      <section className="card"><h2>{niceDay(sel)}</h2>
+        {dayList.length ? <ul className="items">{dayList.map(i => <CalItem key={i.id} i={i} act={act} />)}</ul> : <p className="muted small">Nothing planned.</p>}
+        <form className="stack" onSubmit={add}><h3>Add to this day for {api.brand.label}</h3>
+          <div className="row wrap"><select value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })} aria-label="Type"><option value="broll">To film</option><option value="post">Post</option></select>
+            {f.kind === 'post' && <select value={f.post_type} onChange={e => setF({ ...f, post_type: e.target.value })} aria-label="Post type"><option value="">Post type</option>{POST_TYPES.map(t => <option key={t}>{t}</option>)}</select>}</div>
+          <input required maxLength="280" placeholder={f.kind === 'broll' ? 'Shot to film' : 'Post idea or hook'} value={f.title} onChange={e => setF({ ...f, title: e.target.value })} aria-label="Title" />
+          <input placeholder="Notes (optional)" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} aria-label="Notes" /><button>Add</button></form></section></div>
+    <p className="muted small">These are the same entries your Content Calendar app shows. Reminder times are still set there.</p></div>
 }
 
 function Patterns({ api }) {
